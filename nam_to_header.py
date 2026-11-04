@@ -30,14 +30,68 @@ def _format_float(value: float) -> str:
     return f"{format(value, '.17g')}f"
 
 
+def _extract_weights(payload: dict, target_size: int | None = None) -> list:
+    """Extract weights from both A1 and A2 formats.
+
+    Args:
+        payload: Parsed JSON from .nam file
+        target_size: Optional target weight count (1871 for Lite, 12146 for Full).
+                    If None, returns first valid weights found.
+
+    Returns:
+        List of weights (floats)
+
+    Raises:
+        ValueError: If no valid weights found or no matching submodel
+    """
+    # A1 format: weights at top level
+    if "weights" in payload and isinstance(payload["weights"], list) and payload["weights"]:
+        weights = payload["weights"]
+        if target_size is None or len(weights) == target_size:
+            return weights
+
+    # A2 SlimmableContainer format: weights in submodels
+    if "config" in payload and "submodels" in payload["config"]:
+        submodels = payload["config"]["submodels"]
+        if submodels and isinstance(submodels, list):
+            # Collect all valid submodel weights
+            submodel_weights = []
+            for submodel in submodels:
+                if "model" not in submodel:
+                    continue
+                model = submodel["model"]
+                if "weights" in model and isinstance(model["weights"], list):
+                    submodel_weights.append(model["weights"])
+
+            # If we have specific target size, find matching submodel
+            if target_size is not None:
+                for weights in submodel_weights:
+                    if len(weights) == target_size:
+                        return weights
+                raise ValueError(
+                    f"No submodel with {target_size} weights found. "
+                    f"Available: {[len(w) for w in submodel_weights]}"
+                )
+
+            # No target specified - prefer Full (12146) over Lite (1871)
+            for weights in submodel_weights:
+                if len(weights) == 12146:
+                    return weights
+            for weights in submodel_weights:
+                if len(weights) == 1871:
+                    return weights
+            if submodel_weights:
+                return submodel_weights[0]  # Return first if neither size matches
+
+    raise ValueError("No weights found in .nam file - neither top-level nor in submodels")
+
+
 def convert_nam_to_header(nam_file: Path, header_file: Path) -> tuple[str, int]:
     with nam_file.open("r", encoding="utf-8") as f:
         payload = json.load(f)
 
-    if "weights" not in payload or not isinstance(payload["weights"], list):
-        raise ValueError("Input .nam file must contain a 'weights' array")
+    weights = _extract_weights(payload)
 
-    weights = payload["weights"]
     for idx, value in enumerate(weights):
         if not isinstance(value, (int, float)):
             raise ValueError(f"weights[{idx}] is not numeric")
